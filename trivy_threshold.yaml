@@ -1,0 +1,75 @@
+###Pipeline to Fail with Exit Code 1 If Trivy Docker Image Scan Exceeds a Critical Threshold###
+###IF thresholdcritical: 4 , if [ "$criticalCount" -ge "$(thresholdcritical)" ]; then Pipeline will fail, otherwise pipeline will continue its execution###
+trigger:
+- main
+
+resources:
+- repo: self
+
+variables:
+  tag: 'latest'
+  image_name: 'mysql' 
+  report_directory: 'report'
+  trivyVersion: '0.19.2'
+  thresholdcritical: 4
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+jobs:
+- job: ScanImage
+  displayName: 'Scan Docker Image'
+  steps:
+  # - task: Docker@2
+  #   displayName: 'Login to Dockerhub'
+  #   inputs:
+  #     command: 'login'
+  #     containerRegistry: 'docker_registry_service_connection'
+  #     repository: '$(image_name)'
+  #     tags: '$(tag)'
+
+  - task: CmdLine@2
+    displayName: 'Download and install Trivy'
+    inputs:
+      script: |
+        #!/bin/bash
+        trivyVersion="0.19.2" # Ensure this is set to the correct version
+        downloadUrl="https://github.com/aquasecurity/trivy/releases/download/v${trivyVersion}/trivy_${trivyVersion}_Linux-64bit.deb"
+        echo "Downloading Trivy version ${trivyVersion} from ${downloadUrl}"
+        wget $downloadUrl -O trivy.deb
+        echo "Installing Trivy..."
+        sudo dpkg -i trivy.deb
+        if trivy --version; then
+          echo "Trivy installation successful."
+        else
+          echo "Trivy installation failed."
+          exit 1
+        fi
+        # Step to pull or load the Docker image
+        docker pull mysql
+
+  - task: CmdLine@2
+    displayName: 'Scanning Docker Image with Trivy'
+    inputs:
+      script: |
+        mkdir -p $(Build.SourcesDirectory)/$(report_directory)
+        # Scan the image with Trivy and output the results to a file
+        trivy image --severity CRITICAL --format json --output $(Build.SourcesDirectory)/$(report_directory)/trivy-report.json $(image_name):$(tag)
+        # Count the number of critical vulnerabilities
+        criticalCount=$(jq '.[0].Vulnerabilities | length' $(Build.SourcesDirectory)/$(report_directory)/trivy-report.json)
+        echo "Found $criticalCount critical vulnerabilities."
+        # Compare the count against the threshold
+        if [ "$criticalCount" -ge "$(thresholdcritical)" ]; then
+          echo "Pipeline failure: More than $(thresholdcritical) critical vulnerabilities found."
+          exit 1
+        fi
+        echo "Pipeline continues: Critical vulnerabilities within threshold."
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish vulnerabilities report'
+    condition: succeeded()
+    inputs:
+      PathtoPublish: '$(Build.SourcesDirectory)/$(report_directory)'
+      ArtifactName: 'VulnerabilitiesReport'
+      publishLocation: 'Container'
+
