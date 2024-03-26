@@ -1,0 +1,40 @@
+trigger:
+- main
+
+resources:
+- repo: self
+
+variables:
+  tag: 'latest'
+  image_name: 'mysql'
+  image_tag: 'latest'
+  clair_db: 'arminc/clair-db:latest'
+  clair_scan: 'arminc/clair-local-scan:latest'
+  report_directory: 'report'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+jobs:
+- job: ScanImage
+  displayName: 'Scan Docker Image'
+  steps:
+    - script: |
+        mkdir -p $(report_directory)
+        docker run -d --name clair-db $(clair_db)
+        docker run -p 6060:6060 --link clair-db:postgres -d --name clair $(clair_scan)
+        sleep 15 # Wait for Clair to fully start
+        wget http://github.com/arminc/clair-scanner/releases/download/v8/clair-scanner_linux_amd64
+        mv clair-scanner_linux_amd64 clair-scanner
+        chmod +x clair-scanner
+        ./clair-scanner -c http://localhost:6060 --ip $(hostname -i) -r $(Build.SourcesDirectory)/$(report_directory)/clair-report.json  $(image_name):$(image_tag)
+        cat $(Build.SourcesDirectory)/$(report_directory)/clair-report.json
+      displayName: 'Scan image with Clair'
+      continueOnError: true
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish vulnerabilities report'
+      inputs:
+        PathtoPublish: '$(Build.SourcesDirectory)/$(report_directory)'
+        ArtifactName: 'VulnerabilitiesReport'
+        publishLocation: 'Container'
