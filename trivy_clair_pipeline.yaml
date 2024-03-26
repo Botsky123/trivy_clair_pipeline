@@ -1,0 +1,86 @@
+trigger:
+- main
+
+resources:
+- repo: self
+
+variables:
+  tag: '$(Build.BuildId)'
+  image_name: 'mysql' 
+  image_tag: 'latest'
+  clair_db: 'arminc/clair-db:latest'
+  clair_scan: 'arminc/clair-local-scan:latest'
+  report_directory: 'report'
+  trivyVersion: '0.19.2'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+jobs:
+- job: ScanImage
+  displayName: 'Scan Docker Image'
+  steps:
+  - task: Docker@2
+    displayName: 'Login to Dockerhub'
+    inputs:
+      command: 'login'
+      containerRegistry: 'docker_registry_service_connection'
+      repository: '$(image_name)'
+      tags: '$(image_tag)'
+
+  - task: CmdLine@2
+    displayName: 'Download and install Trivy'
+    inputs:
+      script: |
+        #!/bin/bash
+        trivyVersion="0.19.2" # Ensure this is set to the correct version
+        downloadUrl="https://github.com/aquasecurity/trivy/releases/download/v${trivyVersion}/trivy_${trivyVersion}_Linux-64bit.deb"
+        echo "Downloading Trivy version ${trivyVersion} from ${downloadUrl}"
+        wget $downloadUrl -O trivy.deb
+        echo "Installing Trivy..."
+        sudo dpkg -i trivy.deb
+        if trivy --version; then
+          echo "Trivy installation successful."
+        else
+          echo "Trivy installation failed."
+          exit 1
+        fi
+        # Step to pull or load the Docker image
+        docker pull mysql
+
+  - task: CmdLine@2
+    displayName: Scanning Docker Image
+    inputs:
+      script: |
+        mkdir -p $(Build.SourcesDirectory)/${{ variables.report_directory }}
+        # Scan the image with Trivy
+        # Exit code 0 for MEDIUM, HIGH to not fail the pipeline but show vulnerabilities
+        trivy image --exit-code 0 --severity MEDIUM,HIGH ${{ variables.image_name }}:${{ variables.image_tag }}
+        # Exit code 1 for CRITICAL to fail the pipeline if critical vulnerabilities are found
+        trivy image --exit-code 1 --severity CRITICAL --output $(Build.SourcesDirectory)/${{ variables.report_directory }}/trivy-report.json ${{ variables.image_name }}:${{ variables.image_tag }}
+        # Display the Trivy report for debugging
+        cat $(Build.SourcesDirectory)/${{ variables.report_directory }}/trivy-report.json
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish vulnerabilities report'
+    condition: succeeded()
+    inputs:
+      PathtoPublish: '$(Build.SourcesDirectory)/${{ variables.report_directory }}'
+      ArtifactName: 'VulnerabilitiesReport'
+      publishLocation: 'Container'
+
+
+  - script: |
+      mkdir -p $(report_directory)
+      docker run -d --name clair-db $(clair_db)
+      docker run -p 6060:6060 --link clair-db:postgres -d --name clair $(clair_scan)
+      sleep 15 # Wait for Clair to fully start
+      wget http://github.com/arminc/clair-scanner/releases/download/v8/clair-scanner_linux_amd64
+      mv clair-scanner_linux_amd64 clair-scanner
+      chmod +x clair-scanner
+      ./clair-scanner -c http://localhost:6060 --ip $(hostname -i) -r $(Build.SourcesDirectory)/$(report_directory)/clair-report.json  $(image_name):$(image_tag)
+      cat $(Build.SourcesDirectory)/$(report_directory)/clair-report.json
+    displayName: 'Scan image with Clair'
+    continueOnError: true
+
+
